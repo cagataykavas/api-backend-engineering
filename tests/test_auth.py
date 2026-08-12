@@ -1,4 +1,9 @@
-from auth import create_access_token, hash_password, verify_access_token, verify_password
+from auth import (
+    create_access_token,
+    hash_password,
+    verify_access_token,
+    verify_password,
+)
 
 
 def test_password_hash_roundtrip() -> None:
