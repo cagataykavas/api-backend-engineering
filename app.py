@@ -5,14 +5,17 @@ import time
 from collections import defaultdict, deque
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Query, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="API Backend Engineering Lab", version="1.0.0")
+from telemetry import LATENCY, REQUESTS, configure_telemetry
+
+app = FastAPI(title="API Backend Engineering Lab", version="1.1.0")
+configure_telemetry(app)
 
 ITEMS: dict[int, dict] = {}
 IDEMPOTENCY: dict[str, dict] = {}
-REQUESTS: dict[str, deque[float]] = defaultdict(deque)
+REQUEST_HISTORY: dict[str, deque[float]] = defaultdict(deque)
 RATE_LIMIT = 30
 WINDOW_SECONDS = 60
 
@@ -24,7 +27,7 @@ class ItemCreate(BaseModel):
 
 def rate_limit(client_id: str) -> None:
     now = time.time()
-    bucket = REQUESTS[client_id]
+    bucket = REQUEST_HISTORY[client_id]
     while bucket and bucket[0] <= now - WINDOW_SECONDS:
         bucket.popleft()
     if len(bucket) >= RATE_LIMIT:
@@ -34,6 +37,17 @@ def rate_limit(client_id: str) -> None:
 
 def next_id() -> int:
     return max(ITEMS, default=0) + 1
+
+
+@app.middleware("http")
+async def record_metrics(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    route = request.scope.get("route")
+    path = getattr(route, "path", request.url.path)
+    REQUESTS.labels(request.method, path, str(response.status_code)).inc()
+    LATENCY.labels(request.method, path).observe(time.perf_counter() - start)
+    return response
 
 
 @app.get("/health")
