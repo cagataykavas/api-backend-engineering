@@ -19,8 +19,13 @@ class OrderRepository:
         self.pool = pool
 
     @classmethod
-    async def connect(cls, dsn: str) -> "OrderRepository":
-        pool = await asyncpg.create_pool(dsn=dsn, min_size=2, max_size=10, command_timeout=10)
+    async def connect(cls, dsn: str) -> OrderRepository:
+        pool = await asyncpg.create_pool(
+            dsn=dsn,
+            min_size=2,
+            max_size=10,
+            command_timeout=10,
+        )
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -38,15 +43,14 @@ class OrderRepository:
         return cls(pool)
 
     async def create(self, order: Order) -> None:
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    "INSERT INTO orders(order_id, customer_id, amount, status) VALUES($1, $2, $3, $4)",
-                    order.order_id,
-                    order.customer_id,
-                    order.amount,
-                    order.status,
-                )
+        async with self.pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO orders(order_id, customer_id, amount, status) VALUES($1, $2, $3, $4)",
+                order.order_id,
+                order.customer_id,
+                order.amount,
+                order.status,
+            )
 
     async def get(self, order_id: str) -> Order | None:
         row = await self.pool.fetchrow(
@@ -55,9 +59,18 @@ class OrderRepository:
         )
         if row is None:
             return None
-        return Order(row["order_id"], row["customer_id"], float(row["amount"]), row["status"])
+        return Order(
+            row["order_id"],
+            row["customer_id"],
+            float(row["amount"]),
+            row["status"],
+        )
 
-    async def list_for_customer(self, customer_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    async def list_for_customer(
+        self,
+        customer_id: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
         rows = await self.pool.fetch(
             """
             SELECT order_id, customer_id, amount, status, created_at
