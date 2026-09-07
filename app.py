@@ -29,7 +29,8 @@ from orders import (
 )
 from storage.postgres import PostgresOrderStore
 from storage.redis_cache import JsonRedisCache
-from telemetry import LATENCY, REQUESTS as HTTP_REQUESTS, configure_telemetry
+from telemetry import LATENCY, configure_telemetry
+from telemetry import REQUESTS as HTTP_REQUESTS
 
 ITEMS: dict[int, dict] = {}
 IDEMPOTENCY: dict[str, dict] = {}
