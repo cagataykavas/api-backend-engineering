@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 
 from backend.api.schemas import OrderCreate
 from backend.errors import IdempotencyConflict, InvalidCursor
 from backend.services.orders import OrderService
-
 
 router = APIRouter(prefix="/v1/orders", tags=["orders"])
 
