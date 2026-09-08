@@ -4,7 +4,9 @@ from datetime import datetime
 
 import asyncpg
 
-from orders import CreateOrderResult, IdempotencyConflict, OrderRecord
+from backend.domain.orders import CreateOrderResult, OrderRecord, OrderStatus
+from backend.errors import IdempotencyConflict
+from storage.migration_runner import run_migrations
 
 
 class PostgresOrderStore:
@@ -19,31 +21,11 @@ class PostgresOrderStore:
             max_size=10,
             command_timeout=10,
         )
-        async with pool.acquire() as connection:
-            await connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS orders (
-                    order_id TEXT PRIMARY KEY,
-                    customer_id TEXT NOT NULL,
-                    amount NUMERIC(14,2) NOT NULL CHECK (amount >= 0),
-                    status TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_orders_created
-                    ON orders(created_at DESC, order_id DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_orders_customer_created
-                    ON orders(customer_id, created_at DESC, order_id DESC);
-
-                CREATE TABLE IF NOT EXISTS idempotency_keys (
-                    key TEXT PRIMARY KEY,
-                    body_hash TEXT NOT NULL,
-                    order_id TEXT NOT NULL REFERENCES orders(order_id) ON DELETE CASCADE,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-                """
-            )
+        try:
+            await run_migrations(pool)
+        except Exception:
+            await pool.close()
+            raise
         return cls(pool)
 
     @staticmethod
@@ -52,7 +34,7 @@ class PostgresOrderStore:
             order_id=str(row["order_id"]),
             customer_id=str(row["customer_id"]),
             amount=float(row["amount"]),
-            status=str(row["status"]),
+            status=OrderStatus(str(row["status"])),
             created_at=row["created_at"],
         )
 
@@ -65,8 +47,8 @@ class PostgresOrderStore:
     ) -> CreateOrderResult:
         async with self.pool.acquire() as connection, connection.transaction():
             if idempotency_key is not None:
-                # Transaction-scoped advisory locking serializes concurrent requests
-                # that reuse the same idempotency key without creating a global lock.
+                # A transaction-scoped advisory lock serializes concurrent replays
+                # for one key without introducing a global application lock.
                 await connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                     idempotency_key,
@@ -87,7 +69,7 @@ class PostgresOrderStore:
                             "idempotency key reused with different payload"
                         )
                     return CreateOrderResult(
-                        self._from_row(prior),
+                        order=self._from_row(prior),
                         replayed=True,
                     )
 
@@ -100,7 +82,7 @@ class PostgresOrderStore:
                 order.order_id,
                 order.customer_id,
                 order.amount,
-                order.status,
+                order.status.value,
                 order.created_at,
             )
             if idempotency_key is not None:
@@ -113,7 +95,7 @@ class PostgresOrderStore:
                     body_hash,
                     order.order_id,
                 )
-            return CreateOrderResult(order, replayed=False)
+            return CreateOrderResult(order=order, replayed=False)
 
     async def get(self, order_id: str) -> OrderRecord | None:
         row = await self.pool.fetchrow(

@@ -3,30 +3,18 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import (
-    FastAPI,
-    Header,
-    HTTPException,
-    Query,
-    Request,
-    Response,
-    status,
-)
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
-from orders import (
-    IdempotencyConflict,
-    InMemoryOrderStore,
-    InvalidCursor,
-    OrderCreate,
-    OrderService,
-)
+from backend.api.orders import router as order_router
+from backend.rate_limit import RateLimitExceeded, SlidingWindowRateLimiter
+from backend.repositories.memory import InMemoryOrderStore
+from backend.services.orders import OrderService
 from storage.postgres import PostgresOrderStore
 from storage.redis_cache import JsonRedisCache
 from telemetry import LATENCY, configure_telemetry
@@ -34,9 +22,9 @@ from telemetry import REQUESTS as HTTP_REQUESTS
 
 ITEMS: dict[int, dict] = {}
 IDEMPOTENCY: dict[str, dict] = {}
-REQUEST_HISTORY: dict[str, deque[float]] = defaultdict(deque)
-RATE_LIMIT = 30
-WINDOW_SECONDS = 60
+RATE_LIMITER = SlidingWindowRateLimiter(limit=30, window_seconds=60)
+# Kept as a public alias for backwards-compatible tests and examples.
+REQUEST_HISTORY = RATE_LIMITER.history
 
 
 class ItemCreate(BaseModel):
@@ -45,13 +33,10 @@ class ItemCreate(BaseModel):
 
 
 def rate_limit(client_id: str) -> None:
-    now = time.time()
-    bucket = REQUEST_HISTORY[client_id]
-    while bucket and bucket[0] <= now - WINDOW_SECONDS:
-        bucket.popleft()
-    if len(bucket) >= RATE_LIMIT:
-        raise HTTPException(status_code=429, detail="rate limit exceeded")
-    bucket.append(now)
+    try:
+        RATE_LIMITER.check(client_id)
+    except RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 def next_id() -> int:
@@ -79,6 +64,7 @@ def create_app(
 
         application.state.order_service = OrderService(store, cache)
         application.state.order_cache = cache
+        application.state.rate_limit = rate_limit
         try:
             yield
         finally:
@@ -88,7 +74,7 @@ def create_app(
 
     application = FastAPI(
         title="API Backend Engineering Lab",
-        version="1.2.0",
+        version="1.3.0",
         lifespan=lifespan,
     )
     configure_telemetry(application)
@@ -151,57 +137,7 @@ def create_app(
         next_cursor = ids[-1] if len(ids) == limit else None
         return {"items": results, "next_cursor": next_cursor}
 
-    @application.post("/v1/orders", status_code=status.HTTP_201_CREATED)
-    async def create_order(
-        request: Request,
-        response: Response,
-        payload: OrderCreate,
-        idempotency_key: Annotated[
-            str | None,
-            Header(alias="Idempotency-Key", min_length=1, max_length=200),
-        ] = None,
-        x_client_id: Annotated[
-            str,
-            Header(alias="X-Client-ID"),
-        ] = "anonymous",
-    ):
-        rate_limit(x_client_id)
-        service: OrderService = request.app.state.order_service
-        try:
-            order, replayed = await service.create(
-                payload,
-                idempotency_key=idempotency_key,
-            )
-        except IdempotencyConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        response.headers["Idempotency-Replayed"] = str(replayed).lower()
-        return order
-
-    @application.get("/v1/orders/{order_id}")
-    async def get_order(request: Request, order_id: str):
-        service: OrderService = request.app.state.order_service
-        order = await service.get(order_id)
-        if order is None:
-            raise HTTPException(status_code=404, detail="order not found")
-        return order
-
-    @application.get("/v1/orders")
-    async def list_orders(
-        request: Request,
-        limit: int = Query(20, ge=1, le=100),
-        cursor: str | None = Query(None),
-        customer_id: str | None = Query(None, min_length=1, max_length=80),
-    ):
-        service: OrderService = request.app.state.order_service
-        try:
-            return await service.list_orders(
-                customer_id=customer_id,
-                limit=limit,
-                cursor=cursor,
-            )
-        except InvalidCursor as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
+    application.include_router(order_router)
     return application
 
 
