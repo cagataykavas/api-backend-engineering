@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 
@@ -39,7 +39,7 @@ def create_access_token(
     expires_seconds: int | None = None,
     expires_minutes: int = 30,
 ) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     lifetime = (
         timedelta(seconds=expires_seconds)
         if expires_seconds is not None
