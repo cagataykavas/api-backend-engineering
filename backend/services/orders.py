@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from backend.contracts import JsonCache, OrderStore
@@ -23,7 +24,7 @@ IdFactory = Callable[[], str]
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def new_order_id() -> str:
@@ -36,7 +37,7 @@ def order_to_dict(order: OrderRecord) -> dict[str, object]:
         "customer_id": order.customer_id,
         "amount": order.amount,
         "status": order.status.value,
-        "created_at": order.created_at.astimezone(timezone.utc).isoformat(),
+        "created_at": order.created_at.astimezone(UTC).isoformat(),
     }
 
 
@@ -55,7 +56,7 @@ def canonical_payload_hash(payload: OrderCreateInput) -> str:
 def encode_cursor(order: OrderRecord) -> str:
     payload = json.dumps(
         {
-            "created_at": order.created_at.astimezone(timezone.utc).isoformat(),
+            "created_at": order.created_at.astimezone(UTC).isoformat(),
             "order_id": order.order_id,
         },
         separators=(",", ":"),
@@ -66,7 +67,11 @@ def encode_cursor(order: OrderRecord) -> str:
 def decode_cursor(cursor: str) -> tuple[datetime, str]:
     try:
         padding = "=" * (-len(cursor) % 4)
-        decoded = base64.urlsafe_b64decode((cursor + padding).encode("ascii"))
+        decoded = base64.b64decode(
+            (cursor + padding).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
         payload = json.loads(decoded.decode("utf-8"))
         created_at = datetime.fromisoformat(str(payload["created_at"]))
         if created_at.tzinfo is None:
@@ -77,6 +82,8 @@ def decode_cursor(cursor: str) -> tuple[datetime, str]:
         return created_at, order_id
     except (
         UnicodeDecodeError,
+        UnicodeEncodeError,
+        binascii.Error,
         KeyError,
         TypeError,
         ValueError,
