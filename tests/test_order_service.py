@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -27,8 +27,18 @@ class MemoryCache:
         self.values.pop(key, None)
 
 
+class CountingOrderStore(InMemoryOrderStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.get_calls = 0
+
+    async def get(self, order_id: str) -> OrderRecord | None:
+        self.get_calls += 1
+        return await super().get(order_id)
+
+
 def fixed_clock() -> datetime:
-    return datetime(2026, 9, 8, 7, 30, tzinfo=timezone.utc)
+    return datetime(2026, 9, 8, 7, 30, tzinfo=UTC)
 
 
 def id_factory(values: list[str]):
@@ -43,7 +53,7 @@ def test_order_record_rejects_naive_timestamp() -> None:
             customer_id="customer-1",
             amount=10,
             status=OrderStatus.CREATED,
-            created_at=datetime(2026, 9, 8),
+            created_at=datetime(2026, 9, 8),  # noqa: DTZ001 - intentional invariant test
         )
 
 
@@ -127,8 +137,8 @@ async def test_keyset_pagination_is_stable_for_equal_timestamps() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_uses_cache_after_first_read() -> None:
-    store = InMemoryOrderStore()
+async def test_get_uses_cache_before_repository() -> None:
+    store = CountingOrderStore()
     cache = MemoryCache()
     service = OrderService(
         store,
@@ -141,12 +151,11 @@ async def test_get_uses_cache_after_first_read() -> None:
         idempotency_key=None,
     )
 
-    # Creation populated the cache; remove the backing row to prove the read is cached.
-    store._orders.clear()
     fetched = await service.get("order-001")
 
     assert fetched == created
     assert cache.get_calls == 1
+    assert store.get_calls == 0
 
 
 def test_cursor_decoder_rejects_garbage() -> None:
