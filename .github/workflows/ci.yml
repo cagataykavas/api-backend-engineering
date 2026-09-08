@@ -42,3 +42,7 @@ jobs:
         run: pytest -q
         env:
           INTEGRATION_SERVICES: '1'
+      - name: Validate Compose topology
+        run: docker compose config --quiet
+      - name: Build release image
+        run: docker build -t api-backend-engineering:ci .
