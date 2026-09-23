@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
 from backend.api.orders import router as order_router
+from backend.http_admission import RequestBodyAdmissionMiddleware
 from backend.rate_limit import RateLimitExceeded, SlidingWindowRateLimiter
 from backend.repositories.memory import InMemoryOrderStore
 from backend.services.orders import OrderService
@@ -46,9 +47,24 @@ def next_id() -> int:
 def create_app(
     database_url: str | None = None,
     redis_url: str | None = None,
+    max_request_body_bytes: int | None = None,
 ) -> FastAPI:
     resolved_database_url = database_url or os.getenv("DATABASE_URL")
     resolved_redis_url = redis_url or os.getenv("REDIS_URL")
+    if max_request_body_bytes is None:
+        raw_body_limit = os.getenv("MAX_REQUEST_BODY_BYTES", "1048576")
+        try:
+            resolved_body_limit = int(raw_body_limit)
+        except ValueError as exc:
+            raise ValueError("MAX_REQUEST_BODY_BYTES must be an integer") from exc
+    else:
+        resolved_body_limit = max_request_body_bytes
+    if (
+        isinstance(resolved_body_limit, bool)
+        or not isinstance(resolved_body_limit, int)
+        or resolved_body_limit <= 0
+    ):
+        raise ValueError("MAX_REQUEST_BODY_BYTES must be a positive integer")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -76,6 +92,10 @@ def create_app(
         title="API Backend Engineering Lab",
         version="1.3.0",
         lifespan=lifespan,
+    )
+    application.add_middleware(
+        RequestBodyAdmissionMiddleware,
+        max_body_bytes=resolved_body_limit,
     )
     configure_telemetry(application)
 
