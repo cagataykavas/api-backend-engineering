@@ -7,6 +7,7 @@ import uuid
 import pytest
 from redis.asyncio import Redis
 
+import storage.postgres as postgres_module
 from orders import IdempotencyConflict, OrderCreate, OrderService
 from storage.postgres import PostgresOrderStore
 from storage.redis_cache import JsonRedisCache
@@ -18,10 +19,27 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_postgres_idempotency_and_redis_cache_integration() -> None:
-    store = await PostgresOrderStore.connect(
-        "postgresql://app:app@127.0.0.1:5432/app"
+async def test_postgres_applies_request_budget_as_local_statement_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = await PostgresOrderStore.connect("postgresql://app:app@127.0.0.1:5432/app")
+    budgets = iter([0.200, 0.1499])
+    monkeypatch.setattr(
+        postgres_module,
+        "remaining_request_seconds",
+        lambda *, reserve_ms: next(budgets),
     )
+
+    try:
+        async with store._request_transaction() as connection:
+            assert await connection.fetchval("SHOW statement_timeout") == "149ms"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_idempotency_and_redis_cache_integration() -> None:
+    store = await PostgresOrderStore.connect("postgresql://app:app@127.0.0.1:5432/app")
     redis = Redis.from_url("redis://127.0.0.1:6379/0", decode_responses=True)
     cache = JsonRedisCache(redis, prefix="orders-integration", ttl_seconds=60)
     service = OrderService(store, cache)

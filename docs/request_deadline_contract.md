@@ -41,6 +41,15 @@ The reserve leaves time for serialization and response delivery. Outside a
 request the helper returns `None`; inside a request it returns a monotonic,
 non-negative value.
 
+The Postgres repository applies this contract at two layers. Pool acquisition
+cannot wait longer than the remaining request budget, and every repository
+operation runs in a transaction with a local `statement_timeout`. The database
+budget reserves 25 ms for response handling, rounds down to whole milliseconds,
+and fails before acquiring a connection when that reserve has already consumed
+the request. Transaction-local configuration prevents one request's timeout from
+leaking through the pool into another request. Calls outside an HTTP request keep
+the pool's configured command timeout.
+
 If a streaming response has already emitted headers, HTTP cannot safely replace
 its status with `504`. In that case the middleware cancels the application and
 raises, causing the server to terminate the incomplete stream instead of
@@ -54,6 +63,8 @@ error after the client has received a valid response.
   isolated separately and may not stop immediately.
 - A database or external service can commit before cancellation arrives.
   Mutating endpoints still require idempotency and transactional boundaries.
+- PostgreSQL enforces a transaction-local statement ceiling, but the outer
+  monotonic deadline remains authoritative across multiple sequential queries.
 - This is an end-to-end server processing budget, not a guarantee of client
   network latency or successful response delivery.
 - Proxies must preserve exactly one timeout header. Edge and application limits
@@ -63,6 +74,5 @@ error after the client has received a valid response.
 
 ## Next step
 
-Apply `remaining_request_seconds()` directly to asyncpg statement timeouts and
-outbound HTTP client calls, then expose admitted, expired and remaining-budget
-histograms without high-cardinality labels.
+Propagate the remaining budget to outbound HTTP clients, then expose admitted,
+expired and remaining-budget histograms without high-cardinality labels.
