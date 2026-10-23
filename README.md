@@ -1,6 +1,6 @@
 # API Backend Engineering Lab
 
-A production-shaped FastAPI service built to demonstrate backend engineering concerns that are easy to hide in toy CRUD examples: concurrent idempotency, keyset pagination, cache-aside reads, versioned database migrations, rate limiting, observability, container packaging, and integration tests against real Postgres and Redis services.
+A production-shaped FastAPI service built to demonstrate backend engineering concerns that are easy to hide in toy CRUD examples: concurrent idempotency, keyset pagination, cache-aside reads, versioned database migrations, bounded request deadlines, rate limiting, observability, container packaging, and integration tests against real Postgres and Redis services.
 
 The repository is intentionally small enough to study, but the boundaries mirror a larger service rather than concentrating business logic in route handlers.
 
@@ -10,6 +10,7 @@ The repository is intentionally small enough to study, but the boundaries mirror
 flowchart LR
     C[Client] --> API[FastAPI transport]
     API --> RL[Sliding-window rate limiter]
+    API --> DL[Deadline admission]
     API --> S[OrderService]
     S --> P{OrderStore}
     P --> M[In-memory repository]
@@ -24,12 +25,13 @@ flowchart LR
 ### Request flow
 
 1. FastAPI validates the HTTP contract.
-2. The route delegates order behavior to `OrderService` rather than embedding persistence logic.
-3. The service creates a domain `OrderRecord`, hashes the canonical request payload, and calls an `OrderStore` protocol.
-4. The in-memory adapter serializes concurrent calls with an async lock. The Postgres adapter uses a transaction-scoped advisory lock for one idempotency key.
-5. Successful reads and writes populate the optional Redis cache.
-6. Keyset cursors encode `(created_at, order_id)`, avoiding offset drift when new rows are inserted.
-7. HTTP latency/request metrics and OpenTelemetry instrumentation remain outside the domain layer.
+2. Deadline middleware admits one canonical request budget and propagates it through a monotonic context.
+3. The route delegates order behavior to `OrderService` rather than embedding persistence logic.
+4. The service creates a domain `OrderRecord`, hashes the canonical request payload, and calls an `OrderStore` protocol.
+5. The in-memory adapter serializes concurrent calls with an async lock. The Postgres adapter uses a transaction-scoped advisory lock for one idempotency key.
+6. Successful reads and writes populate the optional Redis cache.
+7. Keyset cursors encode `(created_at, order_id)`, avoiding offset drift when new rows are inserted.
+8. HTTP latency/request metrics and OpenTelemetry instrumentation remain outside the domain layer.
 
 ## Package layout
 
@@ -46,6 +48,8 @@ backend/
     orders.py           # application orchestration + cursor codec
   contracts.py          # storage/cache protocols
   rate_limit.py         # reusable sliding-window limiter
+  request_deadline.py   # bounded ASGI deadline + propagation context
+  http_client.py        # pooled outbound HTTP with shrinking deadline budget
 storage/
   postgres.py           # asyncpg repository
   redis_cache.py        # Redis cache adapter
@@ -83,6 +87,17 @@ orders.py                # compatibility shim for older imports
 `storage/migration_runner.py` discovers ordered SQL migrations and records their SHA-256 checksums in `schema_migrations`.
 
 A previously applied migration whose contents later change is rejected instead of silently mutating schema history. The SQL files are included as Python package data so migrations remain available when the application is installed from a wheel.
+
+### Request deadline propagation
+
+Every HTTP request receives a monotonic processing deadline. Clients can send one canonical `X-Request-Timeout-Ms` header within the configured policy; duplicate, malformed, zero, or excessive values fail before route dispatch. Expiry cancels awaited downstream work and returns a bounded `504` problem response when headers have not yet been sent.
+
+PostgreSQL acquisition/statement timeouts and the pooled outbound HTTP adapter both derive smaller
+budgets from the same monotonic deadline. The HTTP adapter pins a dependency authority, refuses
+caller-supplied framing/host/timeout headers, propagates a still-smaller canonical timeout to the
+dependency, and fails before dispatch when too little response budget remains. See
+[`docs/request_deadline_contract.md`](docs/request_deadline_contract.md) for propagation, streaming,
+and side-effect limits.
 
 ### Deterministic service tests
 

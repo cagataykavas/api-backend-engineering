@@ -14,6 +14,7 @@ from redis.asyncio import Redis
 from backend.api.orders import router as order_router
 from backend.rate_limit import RateLimitExceeded, SlidingWindowRateLimiter
 from backend.repositories.memory import InMemoryOrderStore
+from backend.request_deadline import RequestDeadlineMiddleware
 from backend.services.orders import OrderService
 from storage.postgres import PostgresOrderStore
 from storage.redis_cache import JsonRedisCache
@@ -43,12 +44,37 @@ def next_id() -> int:
     return max(ITEMS, default=0) + 1
 
 
+def positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    if not raw.isascii() or not raw.isdecimal() or raw.startswith("0"):
+        raise ValueError(f"{name} must be a canonical positive integer")
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be a canonical positive integer")
+    return value
+
+
 def create_app(
     database_url: str | None = None,
     redis_url: str | None = None,
+    *,
+    request_timeout_ms: int | None = None,
+    max_request_timeout_ms: int | None = None,
 ) -> FastAPI:
     resolved_database_url = database_url or os.getenv("DATABASE_URL")
     resolved_redis_url = redis_url or os.getenv("REDIS_URL")
+    resolved_request_timeout_ms = (
+        request_timeout_ms
+        if request_timeout_ms is not None
+        else positive_int_env("REQUEST_TIMEOUT_MS", 2_000)
+    )
+    resolved_max_request_timeout_ms = (
+        max_request_timeout_ms
+        if max_request_timeout_ms is not None
+        else positive_int_env("MAX_REQUEST_TIMEOUT_MS", 10_000)
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -74,8 +100,13 @@ def create_app(
 
     application = FastAPI(
         title="API Backend Engineering Lab",
-        version="1.3.0",
+        version="1.4.0",
         lifespan=lifespan,
+    )
+    application.add_middleware(
+        RequestDeadlineMiddleware,
+        default_timeout_ms=resolved_request_timeout_ms,
+        max_timeout_ms=resolved_max_request_timeout_ms,
     )
     configure_telemetry(application)
 

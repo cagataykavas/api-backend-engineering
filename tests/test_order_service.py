@@ -53,7 +53,7 @@ def test_order_record_rejects_naive_timestamp() -> None:
             customer_id="customer-1",
             amount=10,
             status=OrderStatus.CREATED,
-            created_at=datetime(2026, 9, 8),  # noqa: DTZ001 - intentional invariant test
+            created_at=datetime(2026, 9, 8),
         )
 
 

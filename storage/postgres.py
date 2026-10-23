@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import math
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 import asyncpg
 
 from backend.domain.orders import CreateOrderResult, OrderRecord, OrderStatus
 from backend.errors import IdempotencyConflict
+from backend.request_deadline import remaining_request_seconds
 from storage.migration_runner import run_migrations
+
+DATABASE_DEADLINE_RESERVE_MS = 25
+
+
+def _database_timeout_seconds() -> float | None:
+    """Return the request-scoped database budget, preserving response time."""
+
+    remaining = remaining_request_seconds(reserve_ms=DATABASE_DEADLINE_RESERVE_MS)
+    if remaining is not None and remaining <= 0:
+        raise TimeoutError("request deadline exhausted before database operation")
+    return remaining
 
 
 class PostgresOrderStore:
@@ -38,6 +53,25 @@ class PostgresOrderStore:
             created_at=row["created_at"],
         )
 
+    @asynccontextmanager
+    async def _request_transaction(self) -> AsyncIterator[asyncpg.Connection]:
+        """Acquire a connection and apply a transaction-local server timeout."""
+
+        acquire_timeout = _database_timeout_seconds()
+        async with (
+            self.pool.acquire(timeout=acquire_timeout) as connection,
+            connection.transaction(),
+        ):
+            statement_timeout = _database_timeout_seconds()
+            if statement_timeout is not None:
+                timeout_ms = max(1, math.floor(statement_timeout * 1_000))
+                await connection.execute(
+                    "SELECT set_config('statement_timeout', $1, true)",
+                    f"{timeout_ms}ms",
+                    timeout=statement_timeout,
+                )
+            yield connection
+
     async def create(
         self,
         order: OrderRecord,
@@ -45,7 +79,7 @@ class PostgresOrderStore:
         idempotency_key: str | None,
         body_hash: str,
     ) -> CreateOrderResult:
-        async with self.pool.acquire() as connection, connection.transaction():
+        async with self._request_transaction() as connection:
             if idempotency_key is not None:
                 # A transaction-scoped advisory lock serializes concurrent replays
                 # for one key without introducing a global application lock.
@@ -65,9 +99,7 @@ class PostgresOrderStore:
                 )
                 if prior is not None:
                     if str(prior["body_hash"]) != body_hash:
-                        raise IdempotencyConflict(
-                            "idempotency key reused with different payload"
-                        )
+                        raise IdempotencyConflict("idempotency key reused with different payload")
                     return CreateOrderResult(
                         order=self._from_row(prior),
                         replayed=True,
@@ -98,14 +130,15 @@ class PostgresOrderStore:
             return CreateOrderResult(order=order, replayed=False)
 
     async def get(self, order_id: str) -> OrderRecord | None:
-        row = await self.pool.fetchrow(
-            """
-            SELECT order_id, customer_id, amount, status, created_at
-            FROM orders
-            WHERE order_id = $1
-            """,
-            order_id,
-        )
+        async with self._request_transaction() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT order_id, customer_id, amount, status, created_at
+                FROM orders
+                WHERE order_id = $1
+                """,
+                order_id,
+            )
         return None if row is None else self._from_row(row)
 
     async def list_page(
@@ -127,9 +160,7 @@ class PostgresOrderStore:
             arguments.extend([before_created_at, before_order_id])
             timestamp_index = len(arguments) - 1
             order_id_index = len(arguments)
-            conditions.append(
-                f"(created_at, order_id) < (${timestamp_index}, ${order_id_index})"
-            )
+            conditions.append(f"(created_at, order_id) < (${timestamp_index}, ${order_id_index})")
 
         arguments.append(limit)
         where_clause = " AND ".join(conditions) if conditions else "TRUE"
@@ -140,7 +171,8 @@ class PostgresOrderStore:
             ORDER BY created_at DESC, order_id DESC
             LIMIT ${len(arguments)}
         """
-        rows = await self.pool.fetch(query, *arguments)
+        async with self._request_transaction() as connection:
+            rows = await connection.fetch(query, *arguments)
         return [self._from_row(row) for row in rows]
 
     async def close(self) -> None:
