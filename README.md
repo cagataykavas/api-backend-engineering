@@ -49,6 +49,7 @@ backend/
   contracts.py          # storage/cache protocols
   rate_limit.py         # reusable sliding-window limiter
   request_deadline.py   # bounded ASGI deadline + propagation context
+  http_client.py        # pooled outbound HTTP with shrinking deadline budget
 storage/
   postgres.py           # asyncpg repository
   redis_cache.py        # Redis cache adapter
@@ -89,7 +90,14 @@ A previously applied migration whose contents later change is rejected instead o
 
 ### Request deadline propagation
 
-Every HTTP request receives a monotonic processing deadline. Clients can send one canonical `X-Request-Timeout-Ms` header within the configured policy; duplicate, malformed, zero, or excessive values fail before route dispatch. Expiry cancels awaited downstream work and returns a bounded `504` problem response when headers have not yet been sent. See [`docs/request_deadline_contract.md`](docs/request_deadline_contract.md) for streaming and side-effect limits.
+Every HTTP request receives a monotonic processing deadline. Clients can send one canonical `X-Request-Timeout-Ms` header within the configured policy; duplicate, malformed, zero, or excessive values fail before route dispatch. Expiry cancels awaited downstream work and returns a bounded `504` problem response when headers have not yet been sent.
+
+PostgreSQL acquisition/statement timeouts and the pooled outbound HTTP adapter both derive smaller
+budgets from the same monotonic deadline. The HTTP adapter pins a dependency authority, refuses
+caller-supplied framing/host/timeout headers, propagates a still-smaller canonical timeout to the
+dependency, and fails before dispatch when too little response budget remains. See
+[`docs/request_deadline_contract.md`](docs/request_deadline_contract.md) for propagation, streaming,
+and side-effect limits.
 
 ### Deterministic service tests
 

@@ -50,6 +50,24 @@ the request. Transaction-local configuration prevents one request's timeout from
 leaking through the pool into another request. Calls outside an HTTP request keep
 the pool's configured command timeout.
 
+The pooled `DeadlineHttpClient` applies the same contract to outbound HTTP. It:
+
+- pins one HTTP(S) dependency authority and accepts only origin-relative paths;
+- caps every call by the smaller of the remaining request time and the adapter maximum;
+- wraps the complete send/read operation in one `asyncio.timeout`, because HTTPX's phase
+  timeouts alone are not an end-to-end wall-clock budget;
+- also sets bounded connect, pool, read and write phase timeouts;
+- reserves time for the API response and sends a still-smaller canonical
+  `X-Request-Timeout-Ms` value to the dependency;
+- rejects caller overrides of the destination host, framing or timeout header;
+- returns redirects without following them to another authority;
+- fails before connection-pool acquisition when the dispatch minimum is unavailable; and
+- maps transport timeout details to a stable, non-sensitive error code.
+
+Outside an admitted API request, the adapter uses its own bounded default budget. Callers must
+create one client per dependency during application lifespan and close it at shutdown so connection
+pooling is preserved without leaking sockets.
+
 If a streaming response has already emitted headers, HTTP cannot safely replace
 its status with `504`. In that case the middleware cancels the application and
 raises, causing the server to terminate the incomplete stream instead of
@@ -69,10 +87,13 @@ error after the client has received a valid response.
   network latency or successful response delivery.
 - Proxies must preserve exactly one timeout header. Edge and application limits
   should be coordinated so the outermost deadline expires last.
-- A production downstream HTTP client should propagate a smaller remaining
-  budget using the protocol expected by that dependency.
+- HTTP cancellation is cooperative and cannot prove that a remote mutation did not commit.
+  Mutating dependency calls still require idempotency keys and reconciliation.
+- The adapter currently buffers HTTPX responses and does not impose a response-byte ceiling;
+  large or streaming dependencies require a separate bounded streaming contract.
+- DNS behavior remains dependent on the configured HTTPX/httpcore resolver and operating system.
 
 ## Next step
 
-Propagate the remaining budget to outbound HTTP clients, then expose admitted,
-expired and remaining-budget histograms without high-cardinality labels.
+Expose admitted, exhausted and completed outbound calls plus remaining-budget histograms without
+high-cardinality URL labels, then add a bounded streaming-response contract.
