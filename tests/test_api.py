@@ -21,6 +21,13 @@ def test_health(client: TestClient) -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_invalid_trace_context_is_rejected_by_composed_app(client: TestClient) -> None:
+    response = client.get("/health", headers={"traceparent": "caller-controlled-invalid-value"})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "invalid trace context"}
+
+
 def test_idempotent_create_replays_same_response(client: TestClient) -> None:
     headers = {"Idempotency-Key": "abc-123", "X-Client-ID": "pytest"}
     payload = {"name": "risk-score", "value": 0.42}

@@ -31,6 +31,21 @@ flowchart LR
 6. Keyset cursors encode `(created_at, order_id)`, avoiding offset drift when new rows are inserted.
 7. HTTP latency/request metrics and OpenTelemetry instrumentation remain outside the domain layer.
 
+### Inbound trace-context boundary
+
+Externally supplied W3C trace context is admitted before application handling. The boundary accepts
+only canonical version `00` `traceparent` values, bounds aggregate trace headers, validates unique
+and size-limited `tracestate` members, and rejects orphan or ambiguous state. The default contract
+allows at most eight trace-header lines and 2 KiB in aggregate; `tracestate` is further limited to
+512 bytes and 32 members. User-controlled `baggage` is removed instead of being propagated because
+it can carry sensitive, high-cardinality
+metadata across service boundaries. Rejections and baggage removal are exposed only as
+low-cardinality Prometheus counters; header values are never used as labels.
+
+This is an input-integrity and data-minimization control, not trace authentication. A syntactically
+valid caller can still choose a trace ID. Production systems that require trusted correlation should
+start a new trace at the trust boundary or authenticate trace metadata through a controlled gateway.
+
 ## Package layout
 
 ```text
@@ -157,6 +172,7 @@ Important test coverage includes:
 - sliding-window expiration and per-client isolation
 - migration discovery/checksums
 - authentication helpers
+- bounded trace-context admission and baggage stripping
 - HTTP endpoint behavior
 
 ## Container model

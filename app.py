@@ -10,11 +10,13 @@ from typing import Annotated
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
+from starlette.types import ASGIApp
 
 from backend.api.orders import router as order_router
 from backend.rate_limit import RateLimitExceeded, SlidingWindowRateLimiter
 from backend.repositories.memory import InMemoryOrderStore
 from backend.services.orders import OrderService
+from backend.trace_context import TraceContextAdmissionMiddleware
 from storage.postgres import PostgresOrderStore
 from storage.redis_cache import JsonRedisCache
 from telemetry import LATENCY, configure_telemetry
@@ -46,7 +48,7 @@ def next_id() -> int:
 def create_app(
     database_url: str | None = None,
     redis_url: str | None = None,
-) -> FastAPI:
+) -> ASGIApp:
     resolved_database_url = database_url or os.getenv("DATABASE_URL")
     resolved_redis_url = redis_url or os.getenv("REDIS_URL")
 
@@ -138,7 +140,9 @@ def create_app(
         return {"items": results, "next_cursor": next_cursor}
 
     application.include_router(order_router)
-    return application
+    # Wrap the fully instrumented FastAPI application so untrusted baggage is
+    # removed before OpenTelemetry extracts the inbound propagation context.
+    return TraceContextAdmissionMiddleware(application)
 
 
 app = create_app()
