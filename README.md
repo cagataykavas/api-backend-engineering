@@ -1,6 +1,6 @@
 # API Backend Engineering Lab
 
-A production-shaped FastAPI service built to demonstrate backend engineering concerns that are easy to hide in toy CRUD examples: concurrent idempotency, keyset pagination, cache-aside reads, versioned database migrations, rate limiting, observability, container packaging, and integration tests against real Postgres and Redis services.
+A production-shaped FastAPI service built to demonstrate backend engineering concerns that are easy to hide in toy CRUD examples: concurrent idempotency, keyset pagination, cache-aside reads, versioned database migrations, rate limiting, verified HTTPS egress, observability, container packaging, and integration tests against real Postgres and Redis services.
 
 The repository is intentionally small enough to study, but the boundaries mirror a larger service rather than concentrating business logic in route handlers.
 
@@ -46,6 +46,7 @@ backend/
     orders.py           # application orchestration + cursor codec
   contracts.py          # storage/cache protocols
   rate_limit.py         # reusable sliding-window limiter
+  egress.py             # public-only DNS admission + IP-pinned TLS connector
 storage/
   postgres.py           # asyncpg repository
   redis_cache.py        # Redis cache adapter
@@ -87,6 +88,14 @@ A previously applied migration whose contents later change is rejected instead o
 ### Deterministic service tests
 
 `OrderService` accepts injectable clock and ID factories. Tests can therefore verify exact timestamps, IDs, idempotency behavior, pagination ordering, and cache semantics without monkeypatching global functions.
+
+### Verified HTTPS egress
+
+`backend.egress` provides a narrow connector for future webhook or callback integrations. It accepts only HTTPS destinations on an explicit port allowlist, rejects URL credentials and fragments, bounds DNS answer cardinality, and rejects the entire answer set when even one address is loopback, private, link-local, reserved, multicast, or otherwise non-global.
+
+The TLS connection is then opened to a vetted IP address, not the hostname, while retaining the canonical hostname for SNI and certificate verification. The connected peer address must match that IP. This closes the usual validation-to-connect DNS rebinding gap while preserving normal TLS identity checks.
+
+The connector deliberately does not follow redirects or implement HTTP. A caller must re-run destination admission for every redirect and should layer a bounded HTTP implementation over the returned stream. Deployments with an explicit egress proxy should enforce the equivalent policy at that proxy instead of bypassing it.
 
 ## API surface
 
@@ -157,6 +166,7 @@ Important test coverage includes:
 - sliding-window expiration and per-client isolation
 - migration discovery/checksums
 - authentication helpers
+- public-only DNS admission, mixed-answer rejection, and TLS peer pinning
 - HTTP endpoint behavior
 
 ## Container model
@@ -177,5 +187,6 @@ This is a portfolio engineering lab, not a claim of a globally distributed comme
 - a simple cache-aside policy without stale-while-revalidate;
 - schema migrations implemented in a compact local runner rather than Alembic;
 - no message broker or transactional outbox because the current order workflow does not publish external events.
+- the verified egress primitive is intentionally low-level; redirect policy and HTTP response limits belong to the integration that consumes it.
 
 Those omissions are explicit so the repository demonstrates engineering decisions rather than accumulating infrastructure keywords without behavior behind them.
